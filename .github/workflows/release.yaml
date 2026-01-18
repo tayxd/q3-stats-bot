@@ -2,11 +2,18 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "master" ]
+    # branches: [ "master" ] 
+    
+    tags:
+      - 'v*'
+      
   workflow_dispatch:
 
 env:
   BIN_NAME: q3-stats-bot
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -36,11 +43,20 @@ jobs:
       run: |
         mv target/release/${{ env.BIN_NAME }}.exe target/release/${{ env.BIN_NAME }}-win64.exe
 
+    # 1. Upload to Actions Tab (Temporary storage)
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: q3-bot-binary-${{ matrix.os }}
+        name: q3-stats-bot-binary-${{ matrix.os }}
         path: |
           target/release/${{ env.BIN_NAME }}-linux64
           target/release/${{ env.BIN_NAME }}-win64.exe
 
+    # 2. Publish to Releases Page (Permanent storage)
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          target/release/${{ env.BIN_NAME }}-linux64
+          target/release/${{ env.BIN_NAME }}-win64.exe
