@@ -1,5 +1,5 @@
 [package]
-name = "q3kdzbot"
+name = "q3-stats-bot"
 version = "0.1.0"
 edition = "2021"
 
