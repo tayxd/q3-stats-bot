@@ -1,0 +1,46 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  BIN_NAME: q3-stats-bot
+
+jobs:
+  build:
+    name: Build - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: "q3-stats-bot"
+
+    - name: Build
+      run: cargo build --release
+
+    - name: Prepare Artifact (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        mv target/release/${{ env.BIN_NAME }} target/release/${{ env.BIN_NAME }}-linux64
+
+    - name: Prepare Artifact (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        mv target/release/${{ env.BIN_NAME }}.exe target/release/${{ env.BIN_NAME }}-win64.exe
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: q3-bot-binary-${{ matrix.os }}
+        path: |
+          target/release/${{ env.BIN_NAME }}-linux64
+          target/release/${{ env.BIN_NAME }}-win64.exe
+
