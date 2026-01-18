@@ -1,0 +1,16 @@
+[package]
+name = "q3kdzbot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+teloxide = { version = "0.13", features = ["macros"] }
+log = "0.4"
+pretty_env_logger = "0.5"
+tokio = { version =  "1.8", features = ["rt-multi-thread", "macros"] }
+regex = "1.1"
+anyhow = "1"
+quick-xml = "0.37"
+notify = "8"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"

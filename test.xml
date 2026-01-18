@@ -1,0 +1,75 @@
+<?xml version="1.0"?><?xml-stylesheet type="text/xsl" href="../../../basics/stats141.xsl"?>
+<match id="0" datetime="2026/01/18 19:43:59" map="q3dm6" type="TDM" isTeamGame="true" duration="61">
+<team name="" score="5">
+
+<player name="Player1">
+<stat name="Score" value="5"/>
+<stat name="Kills" value="5"/>
+<stat name="Deaths" value="0"/>
+<stat name="Suicides" value="0"/>
+<stat name="Net" value="5"/>
+<stat name="DamageGiven" value="756"/>
+<stat name="DamageTaken" value="0"/>
+<weapons>
+<weapon name="MG" hits="13" shots="29" kills="2"/>
+<weapon name="RL" hits="9" shots="15" kills="3"/>
+</weapons>
+<stat name="HealthTotal" value="25"/>
+<stat name="ArmorTotal" value="250"/>
+<items>
+<item name="MH" pickups="0"/>
+<item name="RA" pickups="2"/>
+<item name="YA" pickups="1"/>
+<item name="GA" pickups="0"/>
+</items>
+<powerups>
+</powerups>
+</player>
+</team>
+<team name="" score="0">
+
+<player name="Player2">
+<stat name="Score" value="0"/>
+<stat name="Kills" value="0"/>
+<stat name="Deaths" value="2"/>
+<stat name="Suicides" value="0"/>
+<stat name="Net" value="-2"/>
+<stat name="DamageGiven" value="0"/>
+<stat name="DamageTaken" value="312"/>
+<weapons>
+</weapons>
+<stat name="HealthTotal" value="0"/>
+<stat name="ArmorTotal" value="0"/>
+<items>
+<item name="MH" pickups="0"/>
+<item name="RA" pickups="0"/>
+<item name="YA" pickups="0"/>
+<item name="GA" pickups="0"/>
+</items>
+<powerups>
+</powerups>
+</player>
+
+<player name="Player3">
+<stat name="Score" value="0"/>
+<stat name="Kills" value="0"/>
+<stat name="Deaths" value="3"/>
+<stat name="Suicides" value="0"/>
+<stat name="Net" value="-3"/>
+<stat name="DamageGiven" value="0"/>
+<stat name="DamageTaken" value="444"/>
+<weapons>
+</weapons>
+<stat name="HealthTotal" value="0"/>
+<stat name="ArmorTotal" value="0"/>
+<items>
+<item name="MH" pickups="0"/>
+<item name="RA" pickups="0"/>
+<item name="YA" pickups="0"/>
+<item name="GA" pickups="0"/>
+</items>
+<powerups>
+</powerups>
+</player>
+</team>
+</match> 
