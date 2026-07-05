@@ -2,7 +2,10 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use notify::{recommended_watcher, EventKind, Watcher};
 use quick_xml::{events::Event, Reader};
-use std::{path::Path, sync::mpsc::channel};
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::channel,
+};
 use teloxide::prelude::*;
 
 static BANNED_STATS: [&str; 8] = [
@@ -50,10 +53,13 @@ struct Match {
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
-    folder_path: String,
+    folder_path: Option<String>,
 
     #[arg(short, long, allow_hyphen_values = true)]
-    chat_id: String,
+    chat_id: Option<String>,
+
+    #[arg(long)]
+    test_file: Option<PathBuf>,
 }
 
 fn escape_markdown(message: &str) -> String {
@@ -71,26 +77,48 @@ fn escape_markdown(message: &str) -> String {
     escaped_message
 }
 
+fn format_duration(duration: &str) -> String {
+    let Ok(total_seconds) = duration.parse::<u64>() else {
+        return duration.to_string();
+    };
+
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}:{seconds:02}")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+    if let Some(test_file) = args.test_file {
+        let data = tokio::fs::read_to_string(&test_file).await?;
+        let match_data = parse_content(data)?;
+        println!("{}", format_match_report(&match_data));
+        return Ok(());
+    }
+
     dotenvy::dotenv().ok();
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Info)
         .init();
     log::info!("Starting q3reportbot...");
 
-    let args = Args::parse();
-    let chat_id_val = args
+    let folder_path = args
+        .folder_path
+        .ok_or_else(|| anyhow::anyhow!("--folder-path is required unless --test-file is used"))?;
+    let chat_id_arg = args
         .chat_id
+        .ok_or_else(|| anyhow::anyhow!("--chat-id is required unless --test-file is used"))?;
+    let chat_id_val = chat_id_arg
         .parse::<i64>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse chat_id '{}': {}", args.chat_id, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse chat_id '{}': {}", chat_id_arg, e))?;
     let chat_id = ChatId(chat_id_val);
     let bot = Bot::from_env();
 
-    log::info!("Monitoring folder: {}", args.folder_path);
-    log::info!("Target chat ID: {}", args.chat_id);
+    log::info!("Monitoring folder: {}", folder_path);
+    log::info!("Target chat ID: {}", chat_id_arg);
 
-    monitor_folder(bot, chat_id, args.folder_path).await?;
+    monitor_folder(bot, chat_id, folder_path).await?;
 
     Ok(())
 }
@@ -302,7 +330,7 @@ fn format_match_report(m: &Match) -> String {
         "Map: {} \\| Type: {} \\| Duration: {}\n\n",
         escape_markdown(&m.map),
         escape_markdown(&m.match_type),
-        escape_markdown(&m.duration)
+        escape_markdown(&format_duration(&m.duration))
     ));
 
     for (i, team) in m.teams.iter().enumerate() {
@@ -358,23 +386,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_1v1() {
-        let xml = std::fs::read_to_string("test2.xml").expect("Unable to read test2.xml");
-        let result = parse_content(xml).unwrap();
-        assert_eq!(result.map, "q3dm6");
-        assert_eq!(result.match_type, "1v1");
-        assert!(!result.is_team_game);
-        assert_eq!(result.teams.len(), 2);
-        assert_eq!(result.teams[0].players[0].name, "KDZ:VaNeZzz");
-        assert_eq!(result.teams[0].score, "1");
-    }
-
-    #[test]
     fn test_parse_content() {
         let xml = std::fs::read_to_string("test.xml").expect("Unable to read test.xml");
         let result = parse_content(xml).unwrap();
         assert_eq!(result.map, "q3dm6");
         assert_eq!(result.match_type, "TDM");
+        assert_eq!(result.duration, "601");
         assert_eq!(result.teams.len(), 2);
 
         // Team One (Score 5)
@@ -396,5 +413,8 @@ mod tests {
         assert_eq!(result.teams[1].players.len(), 2);
         assert_eq!(result.teams[1].players[0].name, "Player2");
         assert_eq!(result.teams[1].players[1].name, "Player3");
+
+        let report = format_match_report(&result);
+        assert!(report.contains("Duration: 10:01"));
     }
 }

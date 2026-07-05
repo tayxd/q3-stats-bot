@@ -27,3 +27,11 @@ set log_default "0" // 0 - OSP, 1 - id format
 ```bash
 .q3-stats-bot --folder-path "/path/to/quakeserver/xmlstats" --chat-id "-100227937281"
 ```
+
+#### Test XML parsing locally
+```bash
+cargo run -- --test-file test.xml
+```
+
+This prints the formatted Telegram message without requiring a Quake 3 server,
+Telegram token, or chat ID.
