@@ -32,6 +32,7 @@ struct Player {
     name: String,
     stats: Vec<(String, String)>,
     weapons: Vec<Weapon>,
+    items: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Default)]
@@ -308,6 +309,20 @@ fn parse_content(data: String) -> Result<Match> {
                             }
                         }
                     }
+                    b"item" => {
+                        if let (Some(name_bytes), Some(pickups_bytes)) = (
+                            attr_map.get(b"name".as_ref()),
+                            attr_map.get(b"pickups".as_ref()),
+                        ) {
+                            let name = String::from_utf8_lossy(name_bytes).into_owned();
+                            let pickups: u32 = String::from_utf8_lossy(pickups_bytes)
+                                .parse()
+                                .unwrap_or(0);
+                            if let Some(player) = current_player.as_mut() {
+                                player.items.push((name, pickups));
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -373,6 +388,16 @@ fn format_match_report(m: &Match) -> String {
                         w.kills
                     ));
                 }
+            }
+
+            let visible_items: Vec<&(String, u32)> =
+                player.items.iter().filter(|(_, p)| *p > 0).collect();
+            if !visible_items.is_empty() {
+                let items_str: Vec<String> = visible_items
+                    .iter()
+                    .map(|(name, pickups)| format!("{}: {}", escape_markdown(name), pickups))
+                    .collect();
+                output.push_str(&format!("Items: \n{}\n", items_str.join(" \\| ")));
             }
             output.push_str("```\n");
         }
