@@ -1,12 +1,17 @@
 use anyhow::{bail, Result};
 use clap::Parser;
-use notify::{recommended_watcher, EventKind, Watcher};
+use notify::{
+    event::{AccessKind, AccessMode, CreateKind, ModifyKind, RenameMode},
+    recommended_watcher, EventKind, Watcher,
+};
 use quick_xml::{events::Event, Reader};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::mpsc::channel,
+    time::Duration,
 };
 use teloxide::prelude::*;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 static BANNED_STATS: [&str; 8] = [
     "MH",
@@ -124,60 +129,168 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Messages handled by the monitor loop.
+enum MonitorMsg {
+    /// Raw event from the filesystem watcher.
+    Fs(notify::Result<notify::Event>),
+    /// A newly created directory that should be scanned for XML files
+    /// (files can land in it before the watcher manages to watch it).
+    ScanDir(PathBuf),
+    /// A file to process after a delay (platforms without close-write events).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    DelayedFile(PathBuf),
+}
+
+/// Delay before scanning a freshly created directory, so the server has time
+/// to finish writing files that were created before the watch was added.
+const NEW_DIR_SCAN_DELAY: Duration = Duration::from_millis(1000);
+
+fn is_xml_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
+}
+
+/// Recursively collects all XML files under `dir`.
+fn collect_xml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::error!("Unable to read directory {:?}: {}", dir, e);
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_xml_files(&path, out);
+        } else if is_xml_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn schedule_dir_scan(tx: &UnboundedSender<MonitorMsg>, dir: PathBuf) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(NEW_DIR_SCAN_DELAY).await;
+        let _ = tx.send(MonitorMsg::ScanDir(dir));
+    });
+}
+
 async fn monitor_folder(bot: Bot, chat_id: ChatId, folder_path: String) -> Result<()> {
-    let (tx, rx) = channel();
-    let mut watcher = recommended_watcher(tx)?;
+    let (tx, mut rx) = unbounded_channel::<MonitorMsg>();
+    let watcher_tx = tx.clone();
+    let mut watcher = recommended_watcher(move |res| {
+        let _ = watcher_tx.send(MonitorMsg::Fs(res));
+    })?;
     let path = Path::new(&folder_path);
 
     watcher.watch(path, notify::RecursiveMode::Recursive)?;
 
     log::info!("Watching for changes in {:?}", path);
 
-    loop {
-        match rx.recv() {
-            Ok(event) => match event {
-                Ok(e) => match e.kind {
-                    EventKind::Create(_) => {
-                        if let Some(fpath) = e.paths.last() {
-                            if fpath.is_dir() {
-                                continue;
-                            }
-                            log::info!("New file detected: {:?}", fpath);
+    // Files already reported, so a file seen both by a directory scan and by
+    // its own close event is sent only once.
+    let mut processed: HashSet<PathBuf> = HashSet::new();
 
-                            // delay to ensure the file is fully written
-                            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-                            match tokio::fs::read_to_string(fpath).await {
-                                Ok(data) => match parse_content(data) {
-                                    Ok(match_data) => {
-                                        let msg = format_match_report(&match_data);
-                                        if let Err(err) = bot
-                                            .send_message(chat_id, msg)
-                                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                                            .await
-                                        {
-                                            log::error!("Failed to send message: {}", err);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("Error parsing content: {}", e);
-                                    }
-                                },
-                                Err(e) => log::error!("Unable to read file {:?}: {}", fpath, e),
-                            }
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            MonitorMsg::Fs(Ok(e)) => match e.kind {
+                EventKind::Create(kind) => {
+                    for p in e.paths {
+                        let is_dir = matches!(kind, CreateKind::Folder)
+                            || (matches!(kind, CreateKind::Any | CreateKind::Other) && p.is_dir());
+                        if is_dir {
+                            log::info!("New directory detected: {:?}", p);
+                            schedule_dir_scan(&tx, p);
+                        } else if !cfg!(target_os = "linux") && is_xml_file(&p) {
+                            // no close-write events outside Linux (inotify):
+                            // wait so the file is fully written
+                            log::info!("New file detected: {:?}", p);
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(NEW_DIR_SCAN_DELAY).await;
+                                let _ = tx.send(MonitorMsg::DelayedFile(p));
+                            });
                         }
                     }
-                    _ => (),
-                },
-                Err(e) => log::error!("Watcher error: {:?}", e),
+                }
+                // something moved into the watched tree (a directory or a finished file)
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                    for p in e.paths {
+                        if p.is_dir() {
+                            log::info!("Directory moved in: {:?}", p);
+                            schedule_dir_scan(&tx, p);
+                        } else if is_xml_file(&p) {
+                            log::info!("File moved in: {:?}", p);
+                            process_file(&bot, chat_id, &p, &mut processed).await;
+                        }
+                    }
+                }
+                EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
+                    for p in e.paths {
+                        if is_xml_file(&p) {
+                            log::info!("New file detected: {:?}", p);
+                            process_file(&bot, chat_id, &p, &mut processed).await;
+                        }
+                    }
+                }
+                _ => (),
             },
-            Err(e) => {
-                log::error!("Channel error: {:?}", e);
-                break;
+            MonitorMsg::Fs(Err(e)) => log::error!("Watcher error: {:?}", e),
+            MonitorMsg::DelayedFile(p) => {
+                process_file(&bot, chat_id, &p, &mut processed).await;
+            }
+            MonitorMsg::ScanDir(dir) => {
+                let dir_clone = dir.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    let mut files = Vec::new();
+                    collect_xml_files(&dir_clone, &mut files);
+                    files.sort();
+                    files
+                })
+                .await?;
+                for p in files {
+                    if !processed.contains(&p) {
+                        log::info!("File found in new directory {:?}: {:?}", dir, p);
+                        process_file(&bot, chat_id, &p, &mut processed).await;
+                    }
+                }
             }
         }
     }
+    log::error!("Watcher channel closed");
     Ok(())
+}
+
+async fn process_file(bot: &Bot, chat_id: ChatId, fpath: &Path, processed: &mut HashSet<PathBuf>) {
+    if processed.contains(fpath) {
+        return;
+    }
+    let data = match tokio::fs::read_to_string(fpath).await {
+        Ok(data) => data,
+        Err(e) => {
+            log::error!("Unable to read file {:?}: {}", fpath, e);
+            return;
+        }
+    };
+    let match_data = match parse_content(data) {
+        Ok(m) => m,
+        Err(e) => {
+            // not marked as processed: a later close event may bring the full file
+            log::error!("Error parsing content of {:?}: {}", fpath, e);
+            return;
+        }
+    };
+    processed.insert(fpath.to_path_buf());
+    let msg = format_match_report(&match_data);
+    if let Err(err) = bot
+        .send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+        .await
+    {
+        log::error!("Failed to send message: {}", err);
+    }
 }
 
 fn parse_content(data: String) -> Result<Match> {
@@ -315,9 +428,8 @@ fn parse_content(data: String) -> Result<Match> {
                             attr_map.get(b"pickups".as_ref()),
                         ) {
                             let name = String::from_utf8_lossy(name_bytes).into_owned();
-                            let pickups: u32 = String::from_utf8_lossy(pickups_bytes)
-                                .parse()
-                                .unwrap_or(0);
+                            let pickups: u32 =
+                                String::from_utf8_lossy(pickups_bytes).parse().unwrap_or(0);
                             if let Some(player) = current_player.as_mut() {
                                 player.items.push((name, pickups));
                             }
@@ -441,5 +553,28 @@ mod tests {
 
         let report = format_match_report(&result);
         assert!(report.contains("Duration: 10:01"));
+    }
+
+    #[test]
+    fn test_is_xml_file() {
+        assert!(is_xml_file(Path::new("/a/b/12_00_00.xml")));
+        assert!(is_xml_file(Path::new("/a/b/GAME.XML")));
+        assert!(!is_xml_file(Path::new("/a/b/game.log")));
+        assert!(!is_xml_file(Path::new("/a/b/xml")));
+    }
+
+    #[test]
+    fn test_collect_xml_files_nested() {
+        let root = std::env::temp_dir().join(format!("q3bot_test_{}", std::process::id()));
+        let day = root.join("2026").join("01").join("19");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("00_05_00.xml"), "x").unwrap();
+        std::fs::write(day.join("notes.txt"), "x").unwrap();
+
+        let mut files = Vec::new();
+        collect_xml_files(&root.join("2026"), &mut files);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(files, vec![day.join("00_05_00.xml")]);
     }
 }
